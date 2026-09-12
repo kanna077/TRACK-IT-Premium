@@ -1,0 +1,85 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.5-pg16-trixie
+    container_name: trackit-premium-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trackit}
+      POSTGRES_USER: ${POSTGRES_USER:-trackit_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trackit_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - trackit_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-trackit_user} -d ${POSTGRES_DB:-trackit}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: trackit-premium-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: trackit-premium-backend
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+      DEBUG: "False"
+    volumes:
+      - ./backend/media:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: trackit-premium-worker
+    command: celery -A config worker -l info
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+      - redis
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trackit-premium-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws/notifications/
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  trackit_postgres:
